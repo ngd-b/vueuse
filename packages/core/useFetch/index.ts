@@ -5,6 +5,7 @@ import { computed, isRef, readonly, shallowRef, toValue, watch } from 'vue'
 import { defaultWindow } from '../_configurable'
 
 export interface UseFetchReturn<T> {
+  readline: () => AsyncGenerator
   /**
    * Indicates if the fetch request has finished
    */
@@ -272,7 +273,46 @@ function combineCallbacks<T = any>(combination: Combination, ...callbacks: (((ct
     }
   }
 }
+function readline_generator(res: Response | null) {
+  const decode = new TextDecoder()
 
+  return async function* () {
+    if (!res || !res.ok || res.headers.get('content-type')?.includes('text/event-stream') === false) {
+      return
+    }
+    const reader = res.body!.getReader()
+
+    let { value, done } = await reader.read()
+    let buffer = value ? decode.decode(value, { stream: true }) : ''
+
+    const re = /\r\n|\r|\n/g
+    let startIndex = 0
+    for (; ;) {
+      const result = re.exec(buffer)
+
+      if (!result) {
+        if (done) {
+          break
+        }
+        ({ value, done } = await reader.read())
+
+        buffer
+          = buffer.substring(startIndex)
+            + (value ? decode.decode(value, { stream: true }) : '')
+
+        startIndex = 0
+        continue
+      }
+
+      yield buffer.substring(startIndex, result.index)
+      startIndex = 0
+    }
+
+    if (startIndex < value!.length) {
+      yield buffer.substring(startIndex)
+    }
+  }
+}
 export function createFetch(config: CreateFetchOptions = {}) {
   const _combination = config.combination || 'chain' as Combination
   const _options = config.options || {}
@@ -550,6 +590,7 @@ export function useFetch<T>(url: MaybeRefOrGetter<string>, ...args: any[]): UseF
   )
 
   const shell: UseFetchReturn<T> = {
+    readline: readline_generator(response.value),
     isFinished: readonly(isFinished),
     isFetching: readonly(isFetching),
     statusCode,
